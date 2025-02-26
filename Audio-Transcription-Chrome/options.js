@@ -1,21 +1,83 @@
 /**
+ * Audio Transcription Pro - Options Page Script
+ * 
+ * This script handles the WebSocket connection to the transcription server
+ * and processes the audio stream from the captured tab.
+ */
+
+// DOM Elements
+let connectionStatus;
+let serverMessages;
+let audioStatus;
+
+// Initialize when the DOM is fully loaded
+document.addEventListener('DOMContentLoaded', () => {
+  // Get DOM elements
+  connectionStatus = document.getElementById('connection-status');
+  serverMessages = document.getElementById('server-messages');
+  audioStatus = document.getElementById('audio-status');
+  
+  // Set initial status
+  updateStatus('connection', 'Waiting for capture to start...');
+});
+
+/**
+ * Update the status display for a specific component
+ * @param {string} type - The type of status to update ('connection', 'server', or 'audio')
+ * @param {string} message - The status message to display
+ * @param {boolean} isError - Whether this is an error message
+ */
+function updateStatus(type, message, isError = false) {
+  const element = type === 'connection' ? connectionStatus : 
+                  type === 'server' ? serverMessages : 
+                  type === 'audio' ? audioStatus : null;
+  
+  if (!element) return;
+  
+  if (isError) {
+    element.style.color = 'var(--error-color)';
+    console.error(message);
+  } else {
+    element.style.color = '';
+  }
+  
+  if (type === 'server') {
+    // For server messages, append rather than replace
+    const timestamp = new Date().toLocaleTimeString();
+    element.innerHTML += `[${timestamp}] ${message}\n`;
+    element.scrollTop = element.scrollHeight;
+  } else {
+    element.textContent = message;
+  }
+}
+
+/**
  * Captures audio from the active tab in Google Chrome.
  * @returns {Promise<MediaStream>} A promise that resolves with the captured audio stream.
  */
-function captureTabAudio() {
-  return new Promise((resolve) => {
-    chrome.tabCapture.capture(
-      {
-        audio: true,
-        video: false,
-      },
-      (stream) => {
-        resolve(stream);
-      }
-    );
-  });
+async function captureTabAudio() {
+  try {
+    updateStatus('connection', 'Requesting tab audio capture...');
+    
+    const stream = await chrome.tabCapture.capture({
+      audio: true,
+      video: false
+    });
+    
+    if (!stream) {
+      throw new Error('Failed to capture tab audio. Make sure the tab has audio playing.');
+    }
+    
+    updateStatus('connection', 'Tab audio capture successful');
+    updateStatus('audio', 'Audio stream active');
+    
+    return stream;
+  } catch (error) {
+    updateStatus('connection', `Tab capture error: ${error.message}`, true);
+    updateStatus('audio', 'Audio capture failed', true);
+    throw error;
+  }
 }
-
 
 /**
  * Sends a message to a specific tab in Google Chrome.
@@ -23,19 +85,23 @@ function captureTabAudio() {
  * @param {any} data - The data to be sent as the message.
  * @returns {Promise<any>} A promise that resolves with the response from the tab.
  */
-function sendMessageToTab(tabId, data) {
+async function sendMessageToTab(tabId, data) {
   return new Promise((resolve) => {
     chrome.tabs.sendMessage(tabId, data, (response) => {
+      if (chrome.runtime.lastError) {
+        console.error(`Error sending message to tab: ${chrome.runtime.lastError.message}`);
+        resolve(null);
+        return;
+      }
       resolve(response);
     });
   });
 }
 
-
 /**
  * Resamples the audio data to a target sample rate of 16kHz.
  * @param {Array|ArrayBuffer|TypedArray} audioData - The input audio data.
- * @param {number} [origSampleRate=44100] - The original sample rate of the audio data.
+ * @param {number} origSampleRate - The original sample rate of the audio data.
  * @returns {Float32Array} The resampled audio data at 16kHz.
  */
 function resampleTo16kHZ(audioData, origSampleRate = 44100) {
@@ -43,7 +109,8 @@ function resampleTo16kHZ(audioData, origSampleRate = 44100) {
   const data = new Float32Array(audioData);
 
   // Calculate the desired length of the resampled data
-  const targetLength = Math.round(data.length * (16000 / origSampleRate));
+  const targetSampleRate = 16000;
+  const targetLength = Math.round(data.length * (targetSampleRate / origSampleRate));
 
   // Create a new Float32Array for the resampled data
   const resampledData = new Float32Array(targetLength);
@@ -56,141 +123,211 @@ function resampleTo16kHZ(audioData, origSampleRate = 44100) {
   // Resample the audio data
   for (let i = 1; i < targetLength - 1; i++) {
     const index = i * springFactor;
-    const leftIndex = Math.floor(index).toFixed();
-    const rightIndex = Math.ceil(index).toFixed();
+    const leftIndex = Math.floor(index);
+    const rightIndex = Math.ceil(index);
     const fraction = index - leftIndex;
     resampledData[i] = data[leftIndex] + (data[rightIndex] - data[leftIndex]) * fraction;
   }
 
-  // Return the resampled data
   return resampledData;
 }
 
+/**
+ * Generates a UUID for client identification
+ * @returns {string} A UUID string
+ */
 function generateUUID() {
-  let dt = new Date().getTime();
-  const uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-    const r = (dt + Math.random() * 16) % 16 | 0;
-    dt = Math.floor(dt / 16);
-    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
   });
-  return uuid;
 }
-
 
 /**
  * Starts recording audio from the captured tab.
- * @param {Object} option - The options object containing the currentTabId.
+ * @param {Object} options - The options object containing configuration parameters.
  */
-async function startRecord(option) {
-  const stream = await captureTabAudio();
-  const uuid = generateUUID();
-
-  if (stream) {
-    // call when the stream inactive
+async function startRecord(options) {
+  try {
+    // Capture the tab audio
+    const stream = await captureTabAudio();
+    
+    if (!stream) {
+      updateStatus('connection', 'Failed to capture tab audio', true);
+      chrome.runtime.sendMessage({ action: "toggleCaptureButtons", data: false });
+      return;
+    }
+    
+    // Set up stream inactive handler
     stream.oninactive = () => {
+      updateStatus('connection', 'Audio stream ended', true);
+      updateStatus('audio', 'Audio stream inactive', true);
       window.close();
     };
-    const socket = new WebSocket(`ws://${option.host}:${option.port}/`);
+    
+    // Generate a unique client ID
+    const uuid = generateUUID();
+    
+    // Connect to the WebSocket server
+    updateStatus('connection', `Connecting to server: ws://${options.host}:${options.port}/...`);
+    
+    const socket = new WebSocket(`ws://${options.host}:${options.port}/`);
     let isServerReady = false;
-    let language = option.language;
-    socket.onopen = function(e) { 
-      socket.send(
-        JSON.stringify({
-          uid: uuid,
-          language: option.language,
-          task: option.task,
-          model: option.modelSize,
-          use_vad: option.useVad
-        })
-      );
+    let language = options.language;
+    
+    // WebSocket event handlers
+    socket.onopen = function(e) {
+      updateStatus('connection', 'WebSocket connection established');
+      updateStatus('server', 'Connected to server');
+      
+      // Send initial configuration to the server
+      const config = {
+        uid: uuid,
+        language: options.language,
+        task: options.task,
+        model: options.modelSize,
+        use_vad: options.useVad
+      };
+      
+      socket.send(JSON.stringify(config));
+      updateStatus('server', `Sent configuration: ${JSON.stringify(config)}`);
+    };
+    
+    socket.onclose = function(e) {
+      updateStatus('connection', `WebSocket connection closed: ${e.code} ${e.reason}`, true);
+      updateStatus('server', `Disconnected: ${e.reason || 'Connection closed'}`, true);
+      chrome.runtime.sendMessage({ action: "toggleCaptureButtons", data: false });
+    };
+    
+    socket.onerror = function(error) {
+      updateStatus('connection', 'WebSocket error', true);
+      updateStatus('server', 'Connection error', true);
+      chrome.runtime.sendMessage({ action: "toggleCaptureButtons", data: false });
     };
 
     socket.onmessage = async (event) => {
-      const data = JSON.parse(event.data);
-      if (data["uid"] !== uuid)
-        return;
-      
-      if (data["status"] === "WAIT"){
-        await sendMessageToTab(option.currentTabId, {
-          type: "showWaitPopup",
-          data: data["message"],
-        });
-        chrome.runtime.sendMessage({ action: "toggleCaptureButtons", data: false }) 
-        chrome.runtime.sendMessage({ action: "stopCapture" })
-        return;
-      }
+      try {
+        const data = JSON.parse(event.data);
         
-      if (isServerReady === false){
-        isServerReady = true;
-        return;
-      }
-      
-      if (language === null) {
-        language = data["language"];
+        // Check if the message is for this client
+        if (data.uid !== uuid) {
+          updateStatus('server', 'Received message for different client, ignoring', true);
+          return;
+        }
         
-        // send message to popup.js to update dropdown
-        // console.log(language);
-        chrome.runtime.sendMessage({
-          action: "updateSelectedLanguage",
-          detectedLanguage: language,
-        });
-
-        return;
+        // Handle wait status
+        if (data.status === "WAIT") {
+          updateStatus('server', `Server busy: ${data.message}`);
+          await sendMessageToTab(options.currentTabId, {
+            type: "showWaitPopup",
+            data: data.message,
+          });
+          chrome.runtime.sendMessage({ action: "toggleCaptureButtons", data: false });
+          chrome.runtime.sendMessage({ action: "stopCapture" });
+          return;
+        }
+        
+        // Handle server ready message
+        if (!isServerReady && data.message === "SERVER_READY") {
+          isServerReady = true;
+          updateStatus('connection', 'Server ready for transcription');
+          updateStatus('server', `Server ready with backend: ${data.backend}`);
+          return;
+        }
+        
+        // Handle language detection
+        if (language === null && data.language) {
+          language = data.language;
+          updateStatus('server', `Detected language: ${language} (probability: ${data.language_prob})`);
+          
+          // Update the UI with detected language
+          chrome.runtime.sendMessage({
+            action: "updateSelectedLanguage",
+            detectedLanguage: language,
+          });
+          return;
+        }
+        
+        // Handle disconnect message
+        if (data.message === "DISCONNECT") {
+          updateStatus('server', 'Server disconnected due to overtime');
+          chrome.runtime.sendMessage({ action: "toggleCaptureButtons", data: false });
+          return;
+        }
+        
+        // Handle transcription segments
+        if (data.segments) {
+          const segmentCount = data.segments.length;
+          if (segmentCount > 0) {
+            const latestText = data.segments[segmentCount - 1].text;
+            updateStatus('server', `Transcription: ${latestText}`);
+          }
+          
+          // Send transcription to content script
+          await sendMessageToTab(options.currentTabId, {
+            type: "transcript",
+            data: event.data,
+          });
+        }
+      } catch (error) {
+        updateStatus('server', `Error processing message: ${error.message}`, true);
       }
-
-      if (data["message"] === "DISCONNECT"){
-        chrome.runtime.sendMessage({ action: "toggleCaptureButtons", data: false })        
-        return;
-      }
-
-      res = await sendMessageToTab(option.currentTabId, {
-        type: "transcript",
-        data: event.data,
-      });
     };
-
     
-    const audioDataCache = [];
-    const context = new AudioContext();
-    const mediaStream = context.createMediaStreamSource(stream);
-    const recorder = context.createScriptProcessor(4096, 1, 1);
-
-    recorder.onaudioprocess = async (event) => {
-      if (!context || !isServerReady) return;
-
-      const inputData = event.inputBuffer.getChannelData(0);
-      const audioData16kHz = resampleTo16kHZ(inputData, context.sampleRate);
-
-      audioDataCache.push(inputData);
-
-      socket.send(audioData16kHz);
+    // Set up audio processing
+    const audioContext = new AudioContext();
+    const mediaStreamSource = audioContext.createMediaStreamSource(stream);
+    const processor = audioContext.createScriptProcessor(4096, 1, 1);
+    
+    // Audio processing callback
+    processor.onaudioprocess = async (event) => {
+      if (!audioContext || !isServerReady) return;
+      
+      try {
+        const inputData = event.inputBuffer.getChannelData(0);
+        
+        // Check if there's actual audio data (not just silence)
+        const hasAudio = inputData.some(sample => Math.abs(sample) > 0.01);
+        
+        if (hasAudio) {
+          updateStatus('audio', 'Processing audio...');
+          
+          // Resample audio to 16kHz for the server
+          const audioData16kHz = resampleTo16kHZ(inputData, audioContext.sampleRate);
+          
+          // Send the audio data to the server
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(audioData16kHz);
+          }
+        } else {
+          updateStatus('audio', 'Silence detected, waiting for audio...');
+        }
+      } catch (error) {
+        updateStatus('audio', `Error processing audio: ${error.message}`, true);
+      }
     };
-
-    // Prevent page mute
-    mediaStream.connect(recorder);
-    recorder.connect(context.destination);
-    mediaStream.connect(context.destination);
-    // }
-  } else {
-    window.close();
+    
+    // Connect the audio nodes
+    mediaStreamSource.connect(processor);
+    processor.connect(audioContext.destination);
+    mediaStreamSource.connect(audioContext.destination);
+    
+    updateStatus('connection', 'Audio processing started');
+    updateStatus('audio', 'Listening for audio...');
+    
+  } catch (error) {
+    updateStatus('connection', `Error: ${error.message}`, true);
+    chrome.runtime.sendMessage({ action: "toggleCaptureButtons", data: false });
   }
 }
 
-/**
- * Listener for incoming messages from the extension's background script.
- * @param {Object} request - The message request object.
- * @param {Object} sender - The sender object containing information about the message sender.
- * @param {Function} sendResponse - The function to send a response back to the message sender.
- */
+// Listen for messages from the extension's background script
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   const { type, data } = request;
 
-  switch (type) {
-    case "start_capture":
-      startRecord(data);
-      break;
-    default:
-      break;
+  if (type === "start_capture") {
+    startRecord(data);
   }
 
   sendResponse({});

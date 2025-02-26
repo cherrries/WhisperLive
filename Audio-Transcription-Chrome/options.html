@@ -3,13 +3,82 @@
 
 <head>
     <meta charset="UTF-8">
-    <title>Audio Transcription Options</title>
-    <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="style.css" type="text/css">
+    <title>Audio Transcription Pro - Options</title>
+    <link rel="stylesheet" href="style.css">
+    <style>
+        body {
+            width: 100%;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--secondary-color);
+            color: var(--text-color);
+            transition: var(--transition);
+        }
+        
+        .container {
+            background-color: var(--secondary-color);
+            border-radius: var(--border-radius);
+            box-shadow: var(--box-shadow);
+            padding: 20px;
+            margin-top: 20px;
+        }
+        
+        .status-container {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: var(--border-radius);
+            background-color: rgba(0, 0, 0, 0.05);
+        }
+        
+        .status-title {
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        
+        .status-message {
+            font-family: monospace;
+            white-space: pre-wrap;
+            max-height: 200px;
+            overflow-y: auto;
+            padding: 10px;
+            background-color: rgba(0, 0, 0, 0.05);
+            border-radius: 4px;
+        }
+        
+        .hidden {
+            display: none;
+        }
+    </style>
 </head>
 
 <body>
+    <div class="header">
+        <img src="./icon128.png" alt="Audio Transcription Pro Logo">
+        <h1>Audio Transcription Pro - Server Connection</h1>
+    </div>
+    
+    <div class="container">
+        <p>This page handles the WebSocket connection to the transcription server. Please do not close this tab while transcription is active.</p>
+        
+        <div class="status-container">
+            <div class="status-title">Connection Status:</div>
+            <div id="connection-status">Initializing...</div>
+        </div>
+        
+        <div class="status-container">
+            <div class="status-title">Server Messages:</div>
+            <div id="server-messages" class="status-message">Waiting for messages...</div>
+        </div>
+        
+        <div class="status-container">
+            <div class="status-title">Audio Status:</div>
+            <div id="audio-status">Waiting for audio capture...</div>
+        </div>
+    </div>
+    
     <script src="options.js"></script>
 </body>
 
